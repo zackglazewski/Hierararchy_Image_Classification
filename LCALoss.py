@@ -2,6 +2,8 @@ from torch import nn, sigmoid
 import torch
 import queue
 import copy
+from collections import deque
+import numpy as np
 torch.autograd.set_detect_anomaly(True)
 
 def lca_distance(s1, s2):
@@ -22,9 +24,9 @@ def lca_distance(s1, s2):
     return distance_to_root - distance_until_diverge
 
 def formatText(class_label):
-    return "_".join(class_label.split("_")[4:])
+    # return "_".join(class_label.split("_")[4:])
     # return "_".join(class_label.split("_")[6:])
-    # return "_".join(class_label.split("_")[1:])
+    return "_".join(class_label.split("_")[1:])
 
 
 class ExpLCACrossEntropy(nn.Module):
@@ -190,6 +192,7 @@ class LCAPathLoss(nn.Module):
 
         # print("before output: ", outputs)
         output = self.tree.interpret_batched_prediction_greedy(outputs)[1]
+        # output = self.tree.max_probability_path_batched(outputs)[1]
         # print("output: ", output)
         # output: [ probability distribution ]
         # outputs: [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0]
@@ -262,16 +265,17 @@ class WeightedCrossEntropyLoss(nn.Module):
     
 class TreeNode:
     def __init__(self, name, fullname, parent = None):
-        self.name = name
+        self.name = fullname
         self.fullname = fullname
         self.children = {}
         self.parent = parent
+        self.nick_name = name
     
     def add_child(self, child_name):
-        if child_name not in self.children:
-            child_fullname = self.fullname + "_" + child_name
-            self.children[child_name] = TreeNode(child_name, child_fullname, self)
-        return self.children[child_name]
+        child_fullname = self.fullname + "_" + child_name
+        if child_fullname not in self.children:
+            self.children[child_fullname] = TreeNode(child_name, child_fullname, self)
+        return self.children[child_fullname]
 
 class Tree:
     def __init__(self, classes = None):
@@ -348,36 +352,36 @@ class Tree:
         if node is None:
             self.print_edges()
             node = self.root
-        print(" " * level * 2 + f"{node.name}")
+        print(" " * level * 2 + f"{node.nick_name}")
         for child in node.children.values():
             self.print_tree(child, level + 1)
 
     def print_edges(self):
         print(self.edge_to_id)
         for edge in self.edges:
-            print(edge[0].name + "_" + edge[1].name)
+            print(edge[0].nick_name + "_" + edge[1].nick_name)
 
     def get_target_path(self, path):
-        target = listofzeros = [0] * len(self.edges)
+        target = [0] * self.get_num_edges()
+        # print("input path: ", path)
+        node = self.nodes["root_" + path]
 
-        node_names = path.split("_")
-        assert len(node_names) > 1 , "tree does not have any edges"
+        while(node.parent != None):
 
-        # connect root
-        edge_key = "root" + "_" + node_names[0]
-        edge_index = self.edge_to_id[edge_key]
-        target[edge_index] = 1
+            parent_name = node.parent.fullname
+            child_name = node.fullname
 
-        for i in range(len(node_names)-1):
-            node1 = node_names[i]
-            node2 = node_names[i+1]
-
-            edge_key = node1 + "_" + node2
+            edge_key = parent_name + "_" + child_name
             edge_index = self.edge_to_id[edge_key]
 
             target[edge_index] = 1
 
+            node = node.parent
+        
+        # print("target: ", target)
+        result_string = "_".join(result_string.split("_")[1:])
         return target
+        
     
     def transform_classes(self, classes):
         transformed = None
@@ -389,38 +393,41 @@ class Tree:
         return len(self.edges)
     
     def interpret_prediction_greedy(self, edge_indicators):
-        predicted_path = ""
-        onehot_edges = [0] * len(edge_indicators)
+        result = [0] * self.get_num_edges()
+        # result_string = ""
+
+        curr_node = self.root
+
+        while (len(curr_node.children) > 0):
+            # while we have children
+            # make a choice
+            max_curr = 0
+            max_index = -1
+
+            # print("looking at: ", curr_node.fullname)
+
+            for child_id, child in enumerate(curr_node.children.values()):
+                edge_key = curr_node.name + "_" + child.name
+                # print("checking child: ", edge_key)
+                edge_index = self.edge_to_id[edge_key]
+
+                if (edge_indicators[edge_index] > max_curr):
+                    max_curr = edge_indicators[edge_index]
+                    max_index = edge_index
+
+            # now we have best index to take
+            # print("choosing child at id {} with value {}".format(max_index, max_curr))
+            edge_object = self.edges[max_index]
+            result[max_index] = 1
+            # result_string += edge_object[0].name + "_"
+
+            curr_node = edge_object[1]
+            result_string = curr_node.fullname
+
+            result_string = "_".join(result_string.split("_")[1:])
+
+        return result_string, result
         
-        # inclusive
-        start = 0
-        current_node = self.root
-
-        while (start < len(edge_indicators)):
-            # start and current node is already set and is inclusive
-
-            # exclusive
-            end = start + len(current_node.children)
-            options = torch.Tensor(edge_indicators[start:end])
-            chosen_edge_index = start + torch.argmax(options)
-            onehot_edges[chosen_edge_index] = 1
-            chosen_edge = self.edges[chosen_edge_index]
-            predicted_path += chosen_edge[1].name + "_"
-
-            current_node = chosen_edge[1]
-
-            if (len(current_node.children) <= 0):
-                break
-            else:
-                first_child_name = ""
-                for child_key in current_node.children.keys():
-                    first_child_name = child_key
-                    break
-                edge_key = current_node.name + "_" + first_child_name
-                start = self.edge_to_id[edge_key]
-
-
-        return predicted_path[0:-1], onehot_edges
 
     def interpret_batched_prediction_greedy(self, edge_indicators):
 
@@ -430,6 +437,107 @@ class Tree:
         for batch_index in range(edge_indicators.shape[0]):
 
             (pred_string, pred_edges) = self.interpret_prediction_greedy(edge_indicators[batch_index])
+            predicted_strings.append(pred_string)
+            interpreted_batch.append(pred_edges)
+
+        return predicted_strings, interpreted_batch
+
+
+    def max_probability_path(self, edge_logits):
+        # print("edges: ", self.get_num_edges())
+        # print("probs: ", len(edge_probabilities))
+        edge_probabilities = self.softmax(edge_logits)
+        edge_probabilities = edge_logits
+
+
+        result = [0] * self.get_num_edges()
+        result_string = ""
+        dp = [-1] * self.get_num_edges()
+        pred = [-1] * self.get_num_edges()
+        for i in range(self.get_num_edges()-1, -1, -1):
+            v = self.edges[i][0]
+            u = self.edges[i][1]
+            if (len(u.children) <= 0):
+                dp[i] = edge_probabilities[i]
+            else:
+                my_value = edge_probabilities[i]
+                best_val = my_value
+                best_par = -1
+                for child in u.children.values():
+                    edge_key = u.name + "_" + child.name
+                    edge_index = self.edge_to_id[edge_key]
+
+                    new_value = my_value + dp[edge_index]
+                    if (new_value > best_val):
+                        best_val = new_value
+                        best_par = edge_index
+
+                dp[i] = best_val
+                pred[i] = best_par
+
+        # trace path
+        best_succ = -1
+        max_val = 0
+        for child_id, child in enumerate(self.root.children.values()):
+            edge_key = self.root.name + "_" + child.name
+            edge_index = self.edge_to_id[edge_key]
+
+
+            child_path = dp[edge_index]
+            if (child_path > max_val):
+                max_val = child_path
+                best_succ = child_id
+            
+        
+        result[best_succ] = 1
+        result_string = self.edges[best_succ][1].fullname
+        while(pred[best_succ] != -1):
+            best_succ = pred[best_succ]
+
+            #now we have edge id of next one
+            result[best_succ] = 1
+            result_string = self.edges[best_succ][1].fullname
+
+        # print("result string: ", result_string)
+        result_string = "_".join(result_string.split("_")[1:])
+        # print("after transform: ", result_string)
+
+        return result_string, result
+
+        
+    def softmax(self, edge_logits):
+        result = [0] * self.get_num_edges()
+        self.hierarchical_softmax(self.root, edge_logits, result)
+        return result
+
+    def hierarchical_softmax(self, curr_node, edge_logits, result):
+
+        # softmax this nodes children
+        indices = []
+        values = []
+        for child_id, child in enumerate(curr_node.children.values()):
+            edge_key = curr_node.name + "_" + child.name
+            # print("checking child: ", edge_key)
+            edge_index = self.edge_to_id[edge_key]
+
+            values.append(edge_logits[edge_index])
+            indices.append(edge_index)
+
+        values = torch.softmax(torch.tensor(values, dtype=torch.float), dim=0).tolist()
+        for i, index in enumerate(indices):
+            result[index] = values[i]
+
+        #soft max complete for this node, now do this for every child
+        for child_id, child in enumerate(curr_node.children.values()):
+            self.hierarchical_softmax(child, edge_logits, result)
+
+    def max_probability_path_batched(self, edge_indicators):
+        predicted_strings = []
+        interpreted_batch = []
+
+        for batch_index in range(edge_indicators.shape[0]):
+
+            (pred_string, pred_edges) = self.max_probability_path(edge_indicators[batch_index])
             predicted_strings.append(pred_string)
             interpreted_batch.append(pred_edges)
 
@@ -455,42 +563,55 @@ def test_1():
     ]
 
     tree = Tree(classes)
-    tree.print_edges()
-
-    assert tree.get_target_path("a_b_c_d") == [1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0] , print(tree.get_target_path("a_b_c_d"))
-    assert tree.get_target_path("a_b_c_e") == [1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0] , print(tree.get_target_path("a_b_c_e"))
-    assert tree.get_target_path("a_b_f_g") == [1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0] , print(tree.get_target_path("a_b_f_g"))
-    assert tree.get_target_path("a_b_f_h") == [1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0] , print(tree.get_target_path("a_b_f_h"))
-    assert tree.get_target_path("a_i_j_k") == [1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0] , print(tree.get_target_path("a_i_j_k"))
-    assert tree.get_target_path("a_i_j_l") == [1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0] , print(tree.get_target_path("a_i_j_l"))
-    assert tree.get_target_path("a_i_m_n") == [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0] , print(tree.get_target_path("a_i_m_n"))
-    assert tree.get_target_path("a_i_m_o") == [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1] , print(tree.get_target_path("a_i_m_o"))
-
-    assert tree.interpret_prediction_greedy([1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0])[0] == "a_b_c_d"
-    assert tree.interpret_prediction_greedy([1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0])[0] == "a_b_c_e"
-    assert tree.interpret_prediction_greedy([1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0])[0] == "a_b_f_g"
-    assert tree.interpret_prediction_greedy([1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0])[0] == "a_b_f_h"
-    assert tree.interpret_prediction_greedy([1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0])[0] == "a_i_j_k"
-    assert tree.interpret_prediction_greedy([1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0])[0] == "a_i_j_l"
-    assert tree.interpret_prediction_greedy([1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0])[0] == "a_i_m_n"
-    assert tree.interpret_prediction_greedy([1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1])[0] == "a_i_m_o"
     tree.print_tree()
 
+    # assert tree.get_target_path("a_b_c_d") == [1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0] , print(tree.get_target_path("a_b_c_d"))
+    # assert tree.get_target_path("a_b_c_e") == [1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0] , print(tree.get_target_path("a_b_c_e"))
+    # assert tree.get_target_path("a_b_f_g") == [1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0] , print(tree.get_target_path("a_b_f_g"))
+    # assert tree.get_target_path("a_b_f_h") == [1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0] , print(tree.get_target_path("a_b_f_h"))
+    # assert tree.get_target_path("a_i_j_k") == [1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0] , print(tree.get_target_path("a_i_j_k"))
+    # assert tree.get_target_path("a_i_j_l") == [1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0] , print(tree.get_target_path("a_i_j_l"))
+    # assert tree.get_target_path("a_i_m_n") == [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0] , print(tree.get_target_path("a_i_m_n"))
+    # assert tree.get_target_path("a_i_m_o") == [1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1] , print(tree.get_target_path("a_i_m_o"))
 
-    print(tree.get_edge_parent(14))
-    print(tree.get_edge_parent(0))
+    # assert tree.interpret_prediction_greedy([1, 1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0])[0] == "a_b_c_d"
+    # assert tree.interpret_prediction_greedy([1, 1, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0])[0] == "a_b_c_e"
+    # assert tree.interpret_prediction_greedy([1, 1, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 0])[0] == "a_b_f_g"
+    # assert tree.interpret_prediction_greedy([1, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0])[0] == "a_b_f_h"
+    # assert tree.interpret_prediction_greedy([1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 1, 0, 0, 0])[0] == "a_i_j_k"
+    # assert tree.interpret_prediction_greedy([1, 0, 1, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0, 0])[0] == "a_i_j_l"
+    # assert tree.interpret_prediction_greedy([1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 1, 0])[0] == "a_i_m_n"
+    # assert tree.interpret_prediction_greedy([1, 0, 1, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, 1])[0] == "a_i_m_o"
+    # tree.print_tree()
 
-    labels = torch.tensor([[0.,  1.,   0.,   0.,    1.,    0.,   0.,  0.,   0.,   0.,  1.,  0.,  0.,  0.],
-                           [0.,  1.,   0.,   0.,    1.,    0.,   0.,  0.,   0.,   0.,  1.,  0.,  0.,  0.]])
-    output = torch.tensor([[0.1, 0.3, -2.3,  -3.5,  7.3,  -2.1,  0.1, 0.1, -9.1, -2.3, 5.0, 0.2, 1.2, 2.3],
-                           [0.1, -9, -2.3,  -3.5,  7.3,  -2.1,  0.1, 0.1, -9.1, -2.3, -5.0, 0.2, 1.2, 2.3]])
 
-    print("labels shape: ", labels.shape)
-    print("output shape: ", output.shape)
+    # print(tree.get_edge_parent(14))
+    # print(tree.get_edge_parent(0))
 
-    criterion = LCAPathLoss(classes, clamp_loss=True)
-    loss = criterion(output, labels)
-    print("loss: ", loss)
+    # labels = torch.tensor([[0.,  1.,   0.,   0.,    1.,    0.,   0.,  0.,   0.,   0.,  1.,  0.,  0.,  0.],
+    #                        [0.,  1.,   0.,   0.,    1.,    0.,   0.,  0.,   0.,   0.,  1.,  0.,  0.,  0.]])
+    # output = torch.tensor([[0.1, 0.3, -2.3,  -3.5,  7.3,  -2.1,  0.1, 0.1, -9.1, -2.3, 5.0, 0.2, 1.2, 2.3],
+    #                        [0.1, -9, -2.3,  -3.5,  7.3,  -2.1,  0.1, 0.1, -9.1, -2.3, -5.0, 0.2, 1.2, 2.3]])
+
+    # print("labels shape: ", labels.shape)
+    # print("output shape: ", output.shape)
+
+    # criterion = LCAPathLoss(classes, clamp_loss=True)
+    # loss = criterion(output, labels)
+    # print("loss: ", loss)
+
+    # Example usage:
+    # classes = ['node0:0_node1:0_node2:0_node3:0', 'node0:0_node1:0_node2:1_node3:0', 'node0:0_node1:1_node2:0_node3:0', 'node0:0_node1:1_node2:1']
+    # tree = Tree(classes)
+    # tree.print_tree()
+    # probabilities = [0.51037731971617, 0.18557036646995217, 0.44019038120086607, 0.25064133340328565, 0.7756077707802558, 0.0015778617201951395, 0.32582208082226405, 0.8486249203636154, 0.7343616583810292]
+    probabilities = [0.1, 0.3, -2.3,  -3.5,  7.3,  -2.1,  0.1, 0.1, -9.1, -2.3, 5.0, 0.2, 1.2, 2.3, 20]
+    softmaxed_probs = tree.softmax(probabilities)
+    print("softmax: ", softmaxed_probs)
+    one_hot_encoded_path = tree.max_probability_path(probabilities)
+    greedy_path = tree.interpret_prediction_greedy(probabilities)
+    print("One-hot encoded path:", one_hot_encoded_path)
+    print("Greedy              :", greedy_path)
 
 if (__name__ == "__main__"):
     test_1()

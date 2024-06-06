@@ -39,6 +39,16 @@ def transform_batch_output(tree, output):
 
     for i in range(batch_size):
         out = output[i]
+        paths.append(tree.max_probability_path(out)[0])
+
+    return paths
+
+def transform_batch_output_greedy(tree, output):
+    batch_size = len(output)
+    paths = []
+
+    for i in range(batch_size):
+        out = output[i]
         paths.append(tree.interpret_prediction_greedy(out)[0])
 
     return paths
@@ -95,6 +105,7 @@ def get_data_loaders(data_dir, batch_size, train = False):
         return (val_loader, test_loader, valid_data_len, test_data_len)
     
 device = torch.device('cuda:0' if torch.cuda.is_available() else 'cpu')
+# device = torch.device('cpu')
 print(device)
 
 data_dir = "inat2021birds/bird_train"
@@ -119,9 +130,15 @@ model.classifier = nn.Sequential(
     nn.Dropout(0.3),
     nn.Linear(2048, taxonomy.get_num_edges())
 )
+# model.load_state_dict(torch.load("vanilla_checkpoints/vanilla_bce_best.pth"))
 model = model.to(device)
 # print(model)
 criterion = nn.BCEWithLogitsLoss()
+# criterion = LCAPathLoss(classes)
+# criterion = LCAHeavyParentLoss(classes)
+# criterion = LCAPathLoss(classes)
+# criterion = LCAEdgeLoss(classes)
+# criterion = nn.CrossEntropyLoss()
 criterion = criterion.to(device)
 optimizer = optim.Adam(model.classifier.parameters(), lr=1e-4)
 scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.97)
@@ -143,7 +160,6 @@ for i in range(100):
         transformed_labels = transformed_labels.to(device)
 
         loss = criterion(output, transformed_labels)
-
         
         loss.backward()
         optimizer.step()
@@ -152,7 +168,7 @@ for i in range(100):
         # print("label: ", transformed_labels)
         # print('Loss: {:.3f}'.format(loss.item()))
 
-        path_preds = transform_batch_output(taxonomy, output)
+        path_preds = transform_batch_output_greedy(taxonomy, output)
         path_labels = transform_batch_labels_to_string(taxonomy, labels)
 
         # print("path_preds : ", path_preds)
@@ -186,7 +202,7 @@ for i in range(100):
             # print("label: ", transformed_labels)
             # print('Loss: {:.3f}'.format(loss.item()))
 
-            path_preds = transform_batch_output(taxonomy, output)
+            path_preds = transform_batch_output_greedy(taxonomy, output)
             path_labels = transform_batch_labels_to_string(taxonomy, labels)
 
         # print("path_preds : ", path_preds)
@@ -198,15 +214,17 @@ for i in range(100):
     val_accuracy = running_correct / valid_data_len
     if (val_accuracy > best_validation_accuracy):
         best_validation_accuracy = val_accuracy
-        torch.save(model.state_dict(), "best.pth")
+        torch.save(model.state_dict(), "bceDp_best.pth")
 
     print("val loss\t{}\tval accuracy\t{}".format(running_loss / valid_data_len, val_accuracy))
     print()
 
-torch.save(model.state_dict(), "last.pth")
+    torch.save(model.state_dict(), "bceDp_checkpoints/bceDp_checkpoint{}.pth".format(i))
+
+torch.save(model.state_dict(), "bceDp_last.pth")
 
 print("Testing With Best")
-model.load_state_dict(torch.load("best.pth"))
+model.load_state_dict(torch.load("bceDp_best.pth"))
 model.eval()
 
 running_correct = 0
@@ -236,7 +254,7 @@ print("Final Test loss\t{}\tFinal Test accuracy\t{}".format(running_loss / valid
 print()
 
 print("Testing With Last")
-model.load_state_dict(torch.load("last.pth"))
+model.load_state_dict(torch.load("bceDp_last.pth"))
 model.eval()
 
 running_correct = 0

@@ -39,7 +39,7 @@ def transform_batch_output(tree, output):
 
     for i in range(batch_size):
         out = output[i]
-        paths.append(tree.interpret_prediction_greedy(out)[0])
+        paths.append(tree.max_probability_path(out)[0])
 
     return paths
 
@@ -121,7 +121,9 @@ model.classifier = nn.Sequential(
 )
 model = model.to(device)
 # print(model)
-criterion = LCAHeavyParentLoss(classes)
+# criterion = LCAHeavyParentLoss(classes)
+# criterion = LCAPathLoss(classes)
+criterion = nn.BCEWithLogitsLoss()
 criterion = criterion.to(device)
 optimizer = optim.Adam(model.classifier.parameters(), lr=1e-4)
 scheduler = optim.lr_scheduler.StepLR(optimizer, step_size=3, gamma=0.97)

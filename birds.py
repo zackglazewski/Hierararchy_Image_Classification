@@ -25,7 +25,8 @@ from tqdm import tqdm
 import time
 import copy
 
-from LCALoss import *
+def formatText(class_label):
+    return " ".join(class_label.split("_")[-2:])
 
 def get_classes(data_dir):
     all_data = datasets.ImageFolder(data_dir)
@@ -75,8 +76,8 @@ def get_data_loaders(data_dir, batch_size, train = False):
         return (val_loader, test_loader, valid_data_len, test_data_len)
     
 dataset_path = "inat2021birds/bird_train"
-(train_loader, train_data_len) = get_data_loaders(dataset_path, 256, train=True)
-(val_loader, test_loader, valid_data_len, test_data_len) = get_data_loaders(dataset_path, 256, train=False)
+(train_loader, train_data_len) = get_data_loaders(dataset_path, 32, train=True)
+(val_loader, test_loader, valid_data_len, test_data_len) = get_data_loaders(dataset_path, 32, train=False)
 classes = get_classes(dataset_path)
 
 dataloaders = {
@@ -106,111 +107,100 @@ torch.backends.cudnn.benchmark = True
 
 
 
-models = [timm.create_model("hf_hub:timm/efficientnet_b3.ra2_in1k", pretrained=True) for i in range(0, 3)]
-criterions = [LCA1Loss(classes), LCA2Loss(classes), WeightedCrossEntropyLoss(classes)]
-optimizers = [optim.Adam(models[0].classifier.parameters(), lr=0.001), 
-              optim.Adam(models[1].classifier.parameters(), lr=0.001), 
-              optim.Adam(models[2].classifier.parameters(), lr=0.001)]
-
-for i in range(len(models)):
-
-    # freeze weights
-    for param in models[i].parameters():
-        param.requires_grad = False
-
-    n_inputs = models[i].classifier.in_features
-    models[i].classifier = nn.Sequential(
-        nn.Linear(n_inputs,2048),
-        nn.SiLU(),
-        nn.Dropout(0.3),
-        nn.Linear(2048, len(classes))
-    )
-
-    models[i] = models[i].to(device)
-    criterions[i] = criterions[i].to(device)
+model = timm.create_model("hf_hub:timm/efficientnet_b3.ra2_in1k", pretrained=True)
+criterion = nn.CrossEntropyLoss()
+optimizer = optim.Adam(model.classifier.parameters(), lr=0.001)
 
 
-optimizers = [optim.Adam(models[0].classifier.parameters(), lr=0.001), 
-              optim.Adam(models[1].classifier.parameters(), lr=0.001), 
-              optim.Adam(models[2].classifier.parameters(), lr=0.001)]
 
-exp_lr_schedulers = [optim.lr_scheduler.StepLR(optimizers[0], step_size=3, gamma=0.97),
-                     optim.lr_scheduler.StepLR(optimizers[1], step_size=3, gamma=0.97),
-                     optim.lr_scheduler.StepLR(optimizers[2], step_size=3, gamma=0.97)]
+# freeze weights
+for param in model.parameters():
+    param.requires_grad = False
+
+n_inputs = model.classifier.in_features
+model.classifier = nn.Sequential(
+    nn.Linear(n_inputs,2048),
+    nn.SiLU(),
+    nn.Dropout(0.3),
+    nn.Linear(2048, len(classes))
+)
+
+model = model.to(device)
+criterion = criterion.to(device)
 
 training_history = {'accuracy':[],'loss':[]}
 validation_history = {'accuracy':[],'loss':[]}
 
 
-def train_model(models, criterions, optimizers, schedulers, num_epochs=25):
+def train_model(model, criterion, optimizer, num_epochs=25):
     since = time.time()
 
-    # best_model_wts = copy.deepcopy(model.state_dict())
+    best_model_wts = copy.deepcopy(model.state_dict())
     best_acc = 0.0
 
     for epoch in range(num_epochs):
-        for model_index in range(len(models)):
 
-            print('Epoch {}/{} model: {}'.format(epoch, num_epochs - 1, model_index))
-            print('-' * 10)
+        print('Epoch {}/{}'.format(epoch, num_epochs - 1))
+        print('-' * 10)
 
-            # Each epoch has a training and validation phase
-            for phase in ['train', 'val']:
-                if phase == 'train':
-                    models[model_index].train()  # Set model to training mode
-                else:
-                    models[model_index].eval()   # Set model to evaluate mode
+        # Each epoch has a training and validation phase
+        for phase in ['train', 'val']:
+            if phase == 'train':
+                model.train()  # Set model to training mode
+            else:
+                model.eval()   # Set model to evaluate mode
 
-                running_loss = 0.0
-                running_corrects = 0
+            running_loss = 0.0
+            running_corrects = 0
 
-                # Iterate over data.
-                for inputs, labels in tqdm(dataloaders[phase]):
-                    inputs = inputs.to(device)
-                    labels = labels.to(device)
+            # Iterate over data.
+            for inputs, labels in tqdm(dataloaders[phase]):
+                inputs = inputs.to(device)
+                labels = labels.to(device)
 
-                    # zero the parameter gradients
-                    optimizers[model_index].zero_grad()
+                # zero the parameter gradients
+                optimizer.zero_grad()
 
-                    # forward
-                    # track history if only in train
-                    with torch.set_grad_enabled(phase == 'train'):
-                        outputs = models[model_index](inputs)
+                # forward
+                # track history if only in train
+                with torch.set_grad_enabled(phase == 'train'):
+                    outputs = model(inputs)
 
 
-                        _, preds = torch.max(outputs, 1)
-                        loss = criterions[model_index](outputs, labels)
+                    _, preds = torch.max(outputs, 1)
+                    loss = criterion(outputs, labels)
 
-                        # backward + optimize only if in training phase
-                        if phase == 'train':
-                            loss.backward()
-                            optimizers[model_index].step()
+                    # backward + optimize only if in training phase
+                    if phase == 'train':
+                        loss.backward()
+                        optimizer.step()
 
-                    # statistics
-                    running_loss += loss.item() * inputs.size(0)
-                    running_corrects += torch.sum(preds == labels.data)
-                if phase == 'train':
-                    schedulers[model_index].step()
+                # statistics
+                running_loss += loss.item() * inputs.size(0)
+                running_corrects += torch.sum(preds == labels.data)
+            # if phase == 'train':
+            #     # scheduler.step()
+            #     pass
 
-                epoch_loss = running_loss / dataset_sizes[phase]
-                epoch_acc = running_corrects.double() / dataset_sizes[phase]
+            epoch_loss = running_loss / dataset_sizes[phase]
+            epoch_acc = running_corrects.double() / dataset_sizes[phase]
 
-                # if phase == 'train':
-                #     training_history['accuracy'].append(epoch_acc)
-                #     training_history['loss'].append(epoch_loss)
-                # elif phase == 'val':
-                #     validation_history['accuracy'].append(epoch_acc)
-                #     validation_history['loss'].append(epoch_loss)
+            if phase == 'train':
+                training_history['accuracy'].append(epoch_acc)
+                training_history['loss'].append(epoch_loss)
+            elif phase == 'val':
+                validation_history['accuracy'].append(epoch_acc)
+                validation_history['loss'].append(epoch_loss)
 
-                print('model: {} {} Loss: {:.4f} Acc: {:.4f}'.format(
-                    model_index, phase, epoch_loss, epoch_acc))
+            print('{} Loss: {:.4f} Acc: {:.4f}'.format(
+                phase, epoch_loss, epoch_acc))
 
-                # deep copy the model
-                if phase == 'val' and epoch_acc > best_acc:
-                    best_acc = epoch_acc
-                    # best_model_wts = copy.deepcopy(models[model_index].state_dict())
+            # deep copy the model
+            if phase == 'val' and epoch_acc > best_acc:
+                best_acc = epoch_acc
+                best_model_wts = copy.deepcopy(model.state_dict())
 
-            print()
+        print()
 
     time_elapsed = time.time() - since
     print('Training complete in {:.0f}m {:.0f}s'.format(
@@ -221,10 +211,10 @@ def train_model(models, criterions, optimizers, schedulers, num_epochs=25):
     # model.load_state_dict(best_model_wts)
     
 
-train_model(models, criterions, optimizers, exp_lr_schedulers, num_epochs=25)
+train_model(model, criterion, optimizer, num_epochs=100)
 
-torch.cuda.empty_cache()
-
+# torch.cuda.empty_cache()
+# model.load_state_dict()
 # from tqdm import tqdm
 # test_loss = 0.0
 # class_correct = list(0. for i in range(len(classes)))
